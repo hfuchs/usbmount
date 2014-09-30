@@ -27,7 +27,6 @@ log()
     fi
 }
 
-
 # Test if the first parameter is in the list given by the second
 # parameter.
 in_list()
@@ -38,18 +37,11 @@ in_list()
     return 1
 }
 
-# Acquire lock.
-lock()
-{
-    log debug "trying to acquire lock /var/run/usbmount/.mount.lock"
-    lockfile-create --retry 3 /var/run/usbmount/.mount || \
-   { log err "cannot acquire lock /var/run/usbmount/.mount.lock"; exit 1; }
-    trap '( lockfile-remove /var/run/usbmount/.mount )' 0
-    log debug "acquired lock /var/run/usbmount/.mount.lock"
-}
-
 ######################################################################
 # Main program
+
+# Magic constants
+locktimeout=10
 
 # Default values for configuration variables.
 ENABLED=1
@@ -74,22 +66,27 @@ if [ ! -x /sbin/blkid ]; then
     exit 1
 fi
 
-# Per Policy 9.3.2, directories under /var/run have to be created
-# after every reboot.
-if [ ! -e /var/run/usbmount ]; then
-    mkdir -p /var/run/usbmount
-    log debug "creating /var/run/usbmount directory"
+# Set up runtime directory (per Policy 9.1.4, directories under /run
+# have to be created after every reboot), keeping in mind that older
+# setups might still use /var/run
+[ -d /run ] && rundir=/run || rundir=/var/run
+rundir="$rundir/usbmount"
+
+if [ ! -e $rundir ]; then
+    mkdir -p $rundir
+    log debug "creating $rundir directory"
 fi
 
 umask 022
 
+log debug "Operation '$1' for device '$DEVNAME'."
 
 if [ "$1" = add ]; then
 
     # Grab device information from device and "divide it"
     #   FIXME: improvement: implement mounting by label (notice that labels
     #   can contain spaces, which makes things a little bit less comfortable).
-    DEVINFO=$(/sbin/blkid -p $DEVNAME)
+    DEVINFO=$(/sbin/blkid -p $DEVNAME)  # Fails if device not formatted (set -e).
     FSTYPE=$(echo "$DEVINFO" | sed 's/.*[[:blank:]]TYPE="\([^"]*\)".*/\1/g; s/[[:blank:]]*//g;')
     UUID=$(echo "$DEVINFO"   | sed 's/.*[[:blank:]]UUID="\([^"]*\)".*/\1/g; s/[[:blank:]]*//g;')
     USAGE=$(echo "$DEVINFO"  | sed 's/.*[[:blank:]]USAGE="\([^"]*\)".*/\1/g; s/[[:blank:]]*//g;')
@@ -116,33 +113,46 @@ if [ "$1" = add ]; then
 	# types to mount.
 	if in_list "$fstype" "$FILESYSTEMS"; then
 
-        lock
+        # BEGIN LOCK
+        # New locking approach using linux-util's flock(1) instead of
+        # lockfile-progs.  The latter does fixed-interval retries which
+        # are multiples of 5 seconds apart: insufferable.  flock's
+        # acquires the lock as soon as it's freed (unless timeout calls).
+        # See flock(1) for the '( flock 9 ) 9>lockfile' idiom.
+        # TODO Technically, the lock file belongs in /run/lock, eh?
+        ( flock -w $locktimeout 9 || \
+            { log err "cannot acquire lock $rundir/.mount.lock"; exit 1; }
+            log debug "acquired lock $rundir/.mount.lock"
 
-	    # Search an available mountpoint.
-	    for v in $MOUNTPOINTS; do
-		if [ -d "$v" ] && ! grep -q "^[^ ][^ ]*  *$v " /proc/mounts; then
-		    mountpoint="$v"
-		    log debug "mountpoint $mountpoint is available for $DEVNAME"
-		    break
-		fi
-	    done
-	    if [ -n "$mountpoint" ]; then
-		# Determine mount options.
-		options=
-		for v in $FS_MOUNTOPTIONS; do
-		    if expr "$v" : "-fstype=$fstype,."; then
-			options="$(echo "$v" | sed 's/^[^,]*,//')"
-			break
-		    fi
-		done
-		if [ -n "$MOUNTOPTIONS" ]; then
-		    options="$MOUNTOPTIONS${options:+,$options}"
-		fi
+            # Search an available mountpoint.
+            for v in $MOUNTPOINTS; do
+                if [ -d "$v" ] && ! grep -q "^[^ ][^ ]*  *$v " /proc/mounts; then
+                    mountpoint="$v"
+                    log debug "mountpoint $mountpoint is available for $DEVNAME"
+                    break
+                fi
+            done
+            if [ -n "$mountpoint" ]; then
+                # Determine mount options.
+                options=
+                for v in $FS_MOUNTOPTIONS; do
+                    if expr "$v" : "-fstype=$fstype,."; then
+                        options="$(echo "$v" | sed 's/^[^,]*,//')"
+                        break
+                    fi
+                done
+                if [ -n "$MOUNTOPTIONS" ]; then
+                    options="$MOUNTOPTIONS${options:+,$options}"
+                fi
 
-		# Mount the filesystem.
-		log info "executing command: mount -t$fstype ${options:+-o$options} $DEVNAME $mountpoint"
-		mount "-t$fstype" "${options:+-o$options}" "$DEVNAME" "$mountpoint"
+                # Mount the filesystem.
+                log info "executing command: mount -t$fstype ${options:+-o$options} $DEVNAME $mountpoint"
+                mount "-t$fstype" "${options:+-o$options}" "$DEVNAME" "$mountpoint"
+            fi
+        ) 9>$rundir/.mount.lock
+        # END LOCK
 
+        if [ -n "$mountpoint" ]; then
 		# Determine vendor and model.
 		vendor=
 		if [ -r "/sys$DEVPATH/device/vendor" ]; then
@@ -178,9 +188,9 @@ if [ "$1" = add ]; then
 		log info "executing command: run-parts /etc/usbmount/mount.d"
 		run-parts /etc/usbmount/mount.d || :
 	    else
-		# No suitable mount point found.
-		log warning "no mountpoint found for $DEVNAME"
-		exit 1
+            log err "No more mount points available.  $DEVNAME not mounted."
+            log err 'Add MOUNTPOINTS in /etc/usbmount/usbmount.conf'
+            exit 1
 	    fi
 	fi
     fi
