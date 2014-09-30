@@ -38,6 +38,15 @@ in_list()
     return 1
 }
 
+# Acquire lock.
+lock()
+{
+    log debug "trying to acquire lock /var/run/usbmount/.mount.lock"
+    lockfile-create --retry 3 /var/run/usbmount/.mount || \
+   { log err "cannot acquire lock /var/run/usbmount/.mount.lock"; exit 1; }
+    trap '( lockfile-remove /var/run/usbmount/.mount )' 0
+    log debug "acquired lock /var/run/usbmount/.mount.lock"
+}
 
 ######################################################################
 # Main program
@@ -77,13 +86,6 @@ umask 022
 
 if [ "$1" = add ]; then
 
-    # Acquire lock.
-    log debug "trying to acquire lock /var/run/usbmount/.mount.lock"
-    lockfile-create --retry 3 /var/run/usbmount/.mount || \
-	{ log err "cannot acquire lock /var/run/usbmount/.mount.lock"; exit 1; }
-    trap '( lockfile-remove /var/run/usbmount/.mount )' 0
-    log debug "acquired lock /var/run/usbmount/.mount.lock"
-
     # Grab device information from device and "divide it"
     #   FIXME: improvement: implement mounting by label (notice that labels
     #   can contain spaces, which makes things a little bit less comfortable).
@@ -113,6 +115,9 @@ if [ "$1" = add ]; then
 	# Test if the filesystem type is in the list of filesystem
 	# types to mount.
 	if in_list "$fstype" "$FILESYSTEMS"; then
+
+        lock
+
 	    # Search an available mountpoint.
 	    for v in $MOUNTPOINTS; do
 		if [ -d "$v" ] && ! grep -q "^[^ ][^ ]*  *$v " /proc/mounts; then
