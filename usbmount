@@ -120,7 +120,7 @@ if [ "$1" = add ]; then
         # acquires the lock as soon as it's freed (unless timeout calls).
         # See flock(1) for the '( flock 9 ) 9>lockfile' idiom.
         # TODO Technically, the lock file belongs in /run/lock, eh?
-        ( flock -w $locktimeout 9 || \
+        { flock -w $locktimeout 9 || \
             { log err "cannot acquire lock $rundir/.mount.lock"; exit 1; }
             log debug "acquired lock $rundir/.mount.lock"
 
@@ -149,7 +149,7 @@ if [ "$1" = add ]; then
                 log info "executing command: mount -t$fstype ${options:+-o$options} $DEVNAME $mountpoint"
                 mount "-t$fstype" "${options:+-o$options}" "$DEVNAME" "$mountpoint"
             fi
-        ) 9>$rundir/.mount.lock
+        } 9>$rundir/.mount.lock
         # END LOCK
 
         if [ -n "$mountpoint" ]; then
